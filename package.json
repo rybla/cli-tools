@@ -1,0 +1,19 @@
+{
+  "name": "cli-tools",
+  "version": "0.0.0",
+  "bin": {
+    "task": "./src/task.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@types/yargs": "^17.0.33",
+    "openai": "^4.84.1",
+    "yargs": "^17.7.2",
+    "zod": "^3.24.2"
+  }
+}
