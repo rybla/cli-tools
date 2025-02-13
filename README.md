@@ -6,10 +6,9 @@ To install dependencies:
 bun install
 ```
 
-To run:
+Export link to binary, so you can run the exposed tools from anywhere.
 
 ```bash
-bun run index.ts
+bun link
+bun link cli-tools
 ```
-
-This project was created using `bun init` in bun v1.1.35. [Bun](https://bun.sh) is a fast all-in-one JavaScript runtime.
