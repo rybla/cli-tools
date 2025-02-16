@@ -14,6 +14,7 @@ type Task = z.infer<typeof Task_schema>
 const Task_schema = z.object({
   date: z.string(),
   description: z.string(),
+  short_description: z.string(),
   tags: z.optional(z.array(z.string()))
 })
 
@@ -87,7 +88,7 @@ await yargs(hideBin(process.argv))
   .option('config', { type: "string", description: "A string representation of config values that should override the config in the tasks dir and the default config.", default: "{}", })
   .command(
     "init",
-    "Initializes a new tasks directory",
+    "Initializes a new tasks directory.",
     (yargs) => yargs,
     async (argv) => await tryAppResult(async () => {
       if (!(await exists(get_dir(argv)))) await mkdir(get_dir(argv))
@@ -104,7 +105,7 @@ await yargs(hideBin(process.argv))
   )
   .command(
     "config-set <key> <val>",
-    "Set key-value pair in config",
+    "Set key-value pair in config.",
     (yargs) => yargs
       .positional("key", { demandOption: true, type: "string" })
       .positional("val", { demandOption: true, type: "string" }),
@@ -134,25 +135,47 @@ await yargs(hideBin(process.argv))
   )
   .command(
     "new <task>",
-    "Creates a new task",
+    "Creates a new task.",
     (yargs) => yargs
       .positional("task", { description: "The description of the task.", type: "string", demandOption: true, })
-      .option("tags", { description: "The tags to associate with the task.", type: "string", string: true, coerce: (s: string) => s.split(",") }),
+      .option("tags", { description: "The tags to associate with the task.", type: "string", string: true }),
     async (argv) => await tryAppResult(async () => {
       const now = new Date()
+      const config = await load_config(argv)
+
+      const description = argv.task.trim()
+
+      const baseURL = config.baseURL !== undefined ? config.baseURL : default_Config.baseURL!
+      const apiKey = config.apiKey !== undefined ? config.apiKey : default_Config.apiKey!
+      const model = config.model !== undefined ? config.model : default_Config.model!
+      const client = new OpenAI({ apiKey, baseURL })
+      const short_description = await (async () => {
+        try {
+          const reply = await client.chat.completions.create({
+            model,
+            messages: [
+              { role: "system", content: "You are a specialized assistant for summarizing reports of completed tasks into concise, short 1-sentence summaries. The user will give you a description of a task they completed. You should respond with a single, very concise, 1-sentence summary of the task, which just captures the essence of description. Reply with JUST your summary." },
+              { role: "user", content: description }
+            ]
+          })
+          return reply.choices[0].message.content
+        } catch (error) {
+          throw new AppError(`Error when generating short description: ${error}`)
+        }
+      })() as string
+
       const task: Task = {
         date: now.toUTCString(),
-        description: argv.task.trim(),
-        tags: argv.tags !== undefined ? argv.tags?.map(x => x.toString()) : [],
+        description,
+        short_description,
+        tags: argv.tags === undefined || argv.tags.trim() === "" ? [] : argv.tags.trim().split(","),
       }
 
       const tasks = await load_tasks(argv)
       tasks.push(task)
 
       // collect how many tasks there were in the last day
-      const config = await load_config(argv)
-      // TODO: use config.recency
-      const recent_tasks = extract_recent_tasks(tasks, { n: 1, unit: "day" })
+      const recent_tasks = extract_recent_tasks(tasks, config.recency ?? { n: 1, unit: "day" })
 
       await save_tasks(argv, tasks)
 
@@ -162,18 +185,24 @@ await yargs(hideBin(process.argv))
   )
   .command(
     "show [number] [unit]",
-    "Shows list of tasks in markdown format, optionally restricted to a recent duration",
+    "Shows list of tasks in markdown format.",
     (yargs) => yargs
       .positional("number", { type: "number", implies: "unit", })
-      .positional("unit", { type: "string", choices: TimeUnit_schema_choices.map(x => x.value), }),
+      .positional("unit", { type: "string", choices: TimeUnit_schema_choices.map(x => x.value), })
+      .option("tags", { description: "Filter by tasks that have any of these tags.", type: "string", string: true, default: "" }),
     async (argv) => await tryAppResult(async () => {
       const tasks = await load_tasks(argv)
+      const tags = argv.tags.trim() === "" ? [] : argv.tags.trim().split(",")
 
       let recent_tasks = tasks
-      if (argv.number) {
+      if (argv.number !== undefined) {
         const n = trySafeParse("number", z.number().safeParse(argv.number))
         const unit = trySafeParse("unit", TimeUnit_schema.safeParse(argv.unit))
         recent_tasks = extract_recent_tasks(tasks, { n, unit })
+      }
+
+      if (tags.length > 0) {
+        recent_tasks = recent_tasks.filter(task => task.tags !== undefined && !tags.every(tag => !task.tags!.includes(tag)))
       }
 
       const dateStyle: Intl.DateTimeFormatOptions = { year: "numeric", month: "long", day: "numeric", hour12: true, hour: "numeric" }
@@ -184,20 +213,33 @@ await yargs(hideBin(process.argv))
 ${recent_tasks
             .map((task) => `
 ## ${(new Date(task.date)).toLocaleDateString(undefined, dateStyle)}
-
+${task.tags === undefined ? "" : `Tags: ${task.tags.join(", ")}\n`}
 ${task.description}
     `.trim())
             .join("\n\n")}
       `.trim()
         )
       } else {
-        console.log("There are no tasks (in the recent duration)")
+        console.log("No tasks meet the criterea")
       }
     })
   )
   .command(
+    "tags-show",
+    "Shows all existing tags",
+    (yargs) => yargs,
+    async (argv) => await tryAppResult(async () => {
+      const tasks = await load_tasks(argv)
+      const tags = new Set(tasks.flatMap(task => task.tags ?? []))
+      console.log(`
+Tags:
+${[...tags].map(tag => ` • ${tag}`).join("\n")}
+`.trim())
+    })
+  )
+  .command(
     "summarize <number> <unit>",
-    "Summarizes tasks in the recent duration",
+    "Summarizes tasks in the recent duration.",
     (yargs) => yargs
       .positional("number", { type: "number", demandOption: true })
       .positional("unit", { type: "string", choices: TimeUnit_schema_choices.map(x => x.value), demandOption: true }),
