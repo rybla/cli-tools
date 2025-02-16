@@ -34,6 +34,24 @@ const TimeUnit_schema = z.union(TimeUnit_schema_choices)
 type Duration = { n: number, unit: TimeUnit }
 const Duration_schema = z.object({ n: z.number(), unit: TimeUnit_schema })
 
+function parseDuration(s: string): Duration {
+  const error = new AppError(`Error during parseDuration: invalid Duration: ${s}`)
+  s = s.trim()
+
+  function go(ss: string[]) {
+    const n = trySafeParse("number", z.number().safeParse(JSON.parse(ss[0])))
+    const unit = trySafeParse("unit", TimeUnit_schema.safeParse(ss[1]))
+    return { n, unit }
+  }
+  { const ss = s.split(" "); if (ss.length == 2) { return go(ss) } }
+  { const ss = s.split("."); if (ss.length == 2) { return go(ss) } }
+  throw error
+}
+
+function showDuration(d: Duration) {
+  return `${d.n} ${d.unit}`
+}
+
 type Config = z.infer<typeof Config_schema>
 const Config_schema = z.object({
   baseURL: z.optional(z.string()),
@@ -156,12 +174,13 @@ await yargs(hideBin(process.argv))
       tasks.push(task)
 
       // collect how many tasks there were in the last day
-      const recent_tasks = extract_recent_tasks(tasks, config.recency ?? { n: 1, unit: "day" })
+      const recency = config.recency ?? default_Config.recency!
+      const recent_tasks = extract_recent_tasks(tasks, recency)
 
       await save_tasks(argv, tasks)
 
       // TODO: replace message with recency
-      console.log(`[✔] created new task (${recent_tasks.length} tasks in the last 24 hours)`)
+      console.log(`[✔] created new task (${recent_tasks.length} tasks in the last ${showDuration(recency)})`)
     }),
   )
   .command(
@@ -184,22 +203,22 @@ await yargs(hideBin(process.argv))
     })
   )
   .command(
-    "show [number] [unit]",
+    "show [recency]",
     "Shows list of tasks in markdown format.",
     (yargs) => yargs
-      .positional("number", { type: "number", implies: "unit", })
-      .positional("unit", { type: "string", choices: TimeUnit_schema_choices.map(x => x.value), })
+      .positional("recency", { type: "string" })
       .option("tags", { description: "Filter by tasks that have any of these tags.", string: true, default: "" })
       .option("short", { description: "Shows the short description instead of the full description for each task", boolean: true, default: false }),
     async (argv) => await tryAppResult(async () => {
       const tasks = await load_tasks(argv)
+
       const tags = argv.tags.trim() === "" ? [] : argv.tags.trim().split(",")
 
       let recent_tasks = tasks
-      if (argv.number !== undefined) {
-        const n = trySafeParse("number", z.number().safeParse(argv.number))
-        const unit = trySafeParse("unit", TimeUnit_schema.safeParse(argv.unit))
-        recent_tasks = extract_recent_tasks(tasks, { n, unit })
+
+      if (argv.recency !== undefined) {
+        const recency = parseDuration(argv.recency)
+        recent_tasks = extract_recent_tasks(tasks, recency)
       }
 
       if (tags.length > 0) {
