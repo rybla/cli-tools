@@ -6,32 +6,47 @@ import { z } from "zod"
 import { exists, mkdir } from "node:fs/promises"
 import { homedir } from "node:os"
 
+// -----------------------------------------------------------------------------
+// types
+// -----------------------------------------------------------------------------
+
 type Task = z.infer<typeof Task_schema>
 const Task_schema = z.object({
   date: z.string(),
   description: z.string(),
+  tags: z.optional(z.array(z.string()))
 })
 
 type Tasks = z.infer<typeof Tasks_schema>
 const Tasks_schema = z.array(Task_schema)
+
+type TimeUnit = z.infer<typeof TimeUnit_schema>
+const TimeUnit_schema_choices = [
+  z.literal("min"),
+  z.literal("hour"),
+  z.literal("day"),
+  z.literal("week"),
+  z.literal("year")
+] as const
+const TimeUnit_schema = z.union(TimeUnit_schema_choices)
+
+type Duration = { n: number, unit: TimeUnit }
+const Duration_schema = z.object({ n: z.number(), unit: TimeUnit_schema })
 
 type Config = z.infer<typeof Config_schema>
 const Config_schema = z.object({
   baseURL: z.optional(z.string()),
   apiKey: z.optional(z.string()),
   model: z.optional(z.string()),
+  recency: z.optional(Duration_schema)
 })
 
-type Duration = { n: number, unit: TimeUnit }
-
-type TimeUnit = z.infer<typeof TimeUnit_schema>
-const TimeUnit_schema = z.union([
-  z.literal("min"),
-  z.literal("hour"),
-  z.literal("day"),
-  z.literal("week"),
-  z.literal("year")
-])
+const default_Config: Config = {
+  baseURL: "http://localhost:11434/v1",
+  apiKey: "ollama",
+  model: "llama3.2:latest",
+  recency: { n: 1, unit: "day" },
+}
 
 // const default_dir = "~/.tasks"
 const default_dir = `${homedir()}/.tasks`
@@ -39,23 +54,53 @@ function get_dir(argv: { dir: string }): string { return argv.dir }
 function get_config_filepath(argv: { dir: string }): string { return `${argv.dir}/config.json` }
 function get_tasks_filepath(argv: { dir: string }): string { return `${argv.dir}/tasks.json` }
 
+// -----------------------------------------------------------------------------
+// AppError
+// -----------------------------------------------------------------------------
+
+class AppError extends Error {
+  constructor(msg: string) {
+    super(msg)
+    this.name = "Tasks App Error"
+    Object.setPrototypeOf(this, AppError.prototype)
+  }
+}
+
+async function tryAppResult<T>(k: () => Promise<T>): Promise<void> {
+  try { await k() }
+  catch (error) {
+    if (error instanceof AppError) {
+      console.error(error.message)
+    } else {
+      throw error
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// yargs
+// -----------------------------------------------------------------------------
+
 await yargs(hideBin(process.argv))
   .scriptName("task")
-  .option('dir', {
-    type: "string",
-    description: "The directory where related files are stored.",
-    default: default_dir,
-  })
+  .option('dir', { type: "string", description: "The directory where related files are stored.", default: default_dir, })
+  .option('config', { type: "string", description: "A string representation of config values that should override the config in the tasks dir and the default config.", default: "{}", })
   .command(
     "init",
     "Initializes a new tasks directory",
     (yargs) => yargs,
-    async (argv) => {
+    async (argv) => await tryAppResult(async () => {
       if (!(await exists(get_dir(argv)))) await mkdir(get_dir(argv))
       await save_tasks(argv, [])
-      await save_config(argv, {})
+      await save_config(argv, default_Config)
       console.log(`[✔] initialized new tasks directory at ${get_dir(argv)}`)
-    }
+    })
+  )
+  .command(
+    "config-reset",
+    "Resets config to the default config.",
+    (yargs) => yargs,
+    async (argv) => await tryAppResult(async () => save_config(argv, default_Config))
   )
   .command(
     "config-set <key> <val>",
@@ -63,110 +108,71 @@ await yargs(hideBin(process.argv))
     (yargs) => yargs
       .positional("key", { demandOption: true, type: "string" })
       .positional("val", { demandOption: true, type: "string" }),
-    async (argv) => {
-      const key_result = Config_schema.keyof().safeParse(argv.key)
-      if (!key_result.success) {
-        console.log(`invalid key "${argv.key}": ${key_result.error.toString()}`)
-        return
-      }
-      const key = key_result.data
-      const config_result = await load_config(argv)
-      if (!config_result.success) {
-        console.log(`invalid config: ${config_result.error.toString()}`)
-        return
-      }
-      const config = config_result.data
+    async (argv) => await tryAppResult(async () => {
+      const key = trySafeParse("key", Config_schema.keyof().safeParse(argv.key))
+      const config = await load_config(argv)
 
-      config[key] = argv.val
+      if (key === "recency") {
+        config[key] = trySafeParse("recency", Duration_schema.safeParse(JSON.parse(argv.val)))
+      } else {
+        config[key] = argv.val
+      }
 
       await save_config(argv, config)
 
       console.log(`[✔] updated config at ${get_config_filepath(argv)}`)
-    },
+    }),
   )
   .command(
     "config-show",
     "Show config.",
     (yargs) => yargs,
-    async (argv) => {
-      const config_result = await load_config(argv)
-      if (!config_result.success) {
-        console.log(`invalid config: ${config_result.error.toString()}`)
-        return
-      }
-      const config = config_result.data
+    async (argv) => await tryAppResult(async () => {
+      const config = await load_config(argv)
       console.log(JSON.stringify(config, undefined, "    "))
-    },
+    }),
   )
   .command(
     "new <task>",
     "Creates a new task",
     (yargs) => yargs
-      .positional("task", {
-        description: "The description of the task.",
-        type: "string",
-        demandOption: true,
-      }),
-    async (argv) => {
+      .positional("task", { description: "The description of the task.", type: "string", demandOption: true, })
+      .option("tags", { description: "The tags to associate with the task.", type: "string", string: true, coerce: (s: string) => s.split(",") }),
+    async (argv) => await tryAppResult(async () => {
       const now = new Date()
       const task: Task = {
         date: now.toUTCString(),
         description: argv.task.trim(),
+        tags: argv.tags !== undefined ? argv.tags?.map(x => x.toString()) : [],
       }
 
-      const tasks_result = await load_tasks(argv)
-      if (!tasks_result.success) {
-        console.log(`invalid tasks: ${tasks_result.error.toString()}`)
-        return
-      }
-      const tasks = tasks_result.data
-
+      const tasks = await load_tasks(argv)
       tasks.push(task)
 
       // collect how many tasks there were in the last day
+      const config = await load_config(argv)
+      // TODO: use config.recency
       const recent_tasks = extract_recent_tasks(tasks, { n: 1, unit: "day" })
 
       await save_tasks(argv, tasks)
 
+      // TODO: replace message with recency
       console.log(`[✔] created new task (${recent_tasks.length} tasks in the last 24 hours)`)
-    },
+    }),
   )
   .command(
     "show [number] [unit]",
     "Shows list of tasks in markdown format, optionally restricted to a recent duration",
     (yargs) => yargs
-      .positional("number", {
-        type: "number",
-        implies: "unit",
-      })
-      .positional("unit", {
-        type: "string",
-        choices: ["min", "hour", "day", "week", "year"],
-      }),
-    async (argv) => {
-      const tasks_result = await load_tasks(argv)
-      if (!tasks_result.success) {
-        console.log(`invalid tasks: ${tasks_result.error.toString()}`)
-        return
-      }
-      const tasks = tasks_result.data
+      .positional("number", { type: "number", implies: "unit", })
+      .positional("unit", { type: "string", choices: TimeUnit_schema_choices.map(x => x.value), }),
+    async (argv) => await tryAppResult(async () => {
+      const tasks = await load_tasks(argv)
 
       let recent_tasks = tasks
       if (argv.number) {
-        const n_result = z.number().safeParse(argv.number)
-        if (!n_result.success) {
-          console.log(`invalid number "${argv.number}": ${n_result.error.toString()}`)
-          return
-        }
-        const n = n_result.data
-
-        const unit_result = TimeUnit_schema.safeParse(argv.unit)
-        if (!unit_result.success) {
-          console.log(`invalid unit "${argv.unit}": ${unit_result.error.toString()}`)
-          return
-        }
-        const unit = unit_result.data
-
+        const n = trySafeParse("number", z.number().safeParse(argv.number))
+        const unit = trySafeParse("unit", TimeUnit_schema.safeParse(argv.unit))
         recent_tasks = extract_recent_tasks(tasks, { n, unit })
       }
 
@@ -187,68 +193,23 @@ ${task.description}
       } else {
         console.log("There are no tasks (in the recent duration)")
       }
-    }
+    })
   )
   .command(
     "summarize <number> <unit>",
     "Summarizes tasks in the recent duration",
     (yargs) => yargs
-      .option("apiKey", { type: "string" })
-      .option("baseURL", { type: "string" })
-      .option("model", { type: "string" })
-      .positional("number", {
-        type: "number",
-        demandOption: true
-      })
-      .positional("unit", {
-        type: "string",
-        choices: ["min", "hour", "day", "week", "year"],
-        demandOption: true
-      }),
-    async (argv) => {
-      const config_result = await load_config(argv)
-      if (!config_result.success) {
-        console.log(`invalid config: ${config_result.error.toString()}`)
-        return
-      }
-      const config = config_result.data
+      .positional("number", { type: "number", demandOption: true })
+      .positional("unit", { type: "string", choices: TimeUnit_schema_choices.map(x => x.value), demandOption: true }),
+    async (argv) => await tryAppResult(async () => {
+      const config = await load_config(argv)
+      const baseURL = config.baseURL !== undefined ? config.baseURL : default_Config.baseURL!
+      const apiKey = config.apiKey !== undefined ? config.apiKey : default_Config.apiKey!
+      const model = config.model !== undefined ? config.model : default_Config.model!
 
-      var apiKey: string = ""
-      if (argv.apiKey !== undefined) { apiKey = argv.apiKey }
-      else if (config.apiKey !== undefined) { apiKey = config.apiKey }
-      else { console.log(`You must provide an "apiKey" value either as an option or in your config.`); return }
-
-      var baseURL: string = ""
-      if (argv.baseURL !== undefined) { baseURL = argv.baseURL }
-      else if (config.baseURL !== undefined) { baseURL = config.baseURL }
-      else { console.log(`You must provide an "baseURL" value either as an option or in your config.`); return }
-
-      var model: string = ""
-      if (argv.model !== undefined) { model = argv.model }
-      else if (config.model !== undefined) { model = config.model }
-      else { console.log(`You must provide an "model" value either as an option or in your config.`); return }
-
-      const unit_result = TimeUnit_schema.safeParse(argv.unit)
-      if (!unit_result.success) {
-        console.log(`invalid unit "${argv.unit}": ${unit_result.error.toString()}`)
-        return
-      }
-      const unit = unit_result.data
-
-      const n_result = z.number().safeParse(argv.number)
-      if (!n_result.success) {
-        console.log(`invalid number "${argv.number}": ${n_result.error.toString()}`)
-        return
-      }
-      const n = n_result.data
-
-      const tasks_result = await load_tasks(argv)
-      if (!tasks_result.success) {
-        console.log(`invalid tasks: ${tasks_result.error.toString()}`)
-        return
-      }
-      const tasks = tasks_result.data
-
+      const unit = trySafeParse("unit", TimeUnit_schema.safeParse(argv.unit))
+      const n = trySafeParse("n", z.number().safeParse(argv.number))
+      const tasks = await load_tasks(argv)
       const recent_tasks = extract_recent_tasks(tasks, { n, unit })
 
       const client = new OpenAI({ apiKey, baseURL })
@@ -279,16 +240,19 @@ ${transcript}`
       })
       const summary = response.choices[0].message.content
       console.log(summary)
-    }
+    })
   )
   .showHelpOnFail(true)
   .demandCommand()
   .parse()
 
 
-async function load_config(argv: { dir: string }): Promise<z.SafeParseReturnType<any, Config>> {
+async function load_config(argv: { dir: string, config: string }): Promise<Config> {
   const config_json = await Bun.file(`${get_config_filepath(argv)}`).json()
-  return Config_schema.safeParse(config_json)
+  const config = trySafeParse("load_config", Config_schema.safeParse(config_json))
+  const config_override = trySafeParse("load_config (override)", Config_schema.safeParse(JSON.parse(argv.config)))
+  const config_new: Config = { ...config, ...config_override }
+  return config_new
 }
 
 async function save_config(argv: { dir: string }, config: Config): Promise<void> {
@@ -296,10 +260,10 @@ async function save_config(argv: { dir: string }, config: Config): Promise<void>
   Bun.write(config_file, JSON.stringify(config, undefined, "    "))
 }
 
-async function load_tasks(argv: { dir: string }): Promise<z.SafeParseReturnType<any, Tasks>> {
+async function load_tasks(argv: { dir: string }): Promise<Tasks> {
   const tasks_file = Bun.file(`${get_tasks_filepath(argv)}`)
   const tasks_json: any = await tasks_file.json()
-  return Tasks_schema.safeParse(tasks_json)
+  return trySafeParse("load_tasks", Tasks_schema.safeParse(tasks_json))
 }
 
 function getTime_Duration({ n, unit }: Duration): number {
@@ -317,7 +281,7 @@ function getTime_Duration({ n, unit }: Duration): number {
   }
 }
 
-function extract_recent_tasks(tasks: Task[], d: Duration) {
+function extract_recent_tasks(tasks: Task[], d: Duration): Task[] {
   const cutoff_time = (new Date()).getTime() - getTime_Duration(d)
   return tasks.filter((task) => cutoff_time <= (new Date(task.date)).getTime())
 }
@@ -325,4 +289,9 @@ function extract_recent_tasks(tasks: Task[], d: Duration) {
 async function save_tasks(argv: { dir: string }, tasks: Task[]): Promise<void> {
   const tasks_file = Bun.file(`${get_tasks_filepath(argv)}`)
   Bun.write(tasks_file, JSON.stringify(tasks, undefined, "    "))
+}
+
+function trySafeParse<T, U>(label: string, pr: z.SafeParseReturnType<T, U>): U {
+  if (!pr.success) throw new AppError(`Parse error at "${label}": ${pr.error.toString()}`)
+  return pr.data
 }
