@@ -14,7 +14,7 @@ type Task = z.infer<typeof Task_schema>
 const Task_schema = z.object({
   date: z.string(),
   description: z.string(),
-  short_description: z.string(),
+  short_description: z.optional(z.string()),
   tags: z.optional(z.array(z.string()))
 })
 
@@ -142,27 +142,8 @@ await yargs(hideBin(process.argv))
     async (argv) => await tryAppResult(async () => {
       const now = new Date()
       const config = await load_config(argv)
-
       const description = argv.task.trim()
-
-      const baseURL = config.baseURL !== undefined ? config.baseURL : default_Config.baseURL!
-      const apiKey = config.apiKey !== undefined ? config.apiKey : default_Config.apiKey!
-      const model = config.model !== undefined ? config.model : default_Config.model!
-      const client = new OpenAI({ apiKey, baseURL })
-      const short_description = await (async () => {
-        try {
-          const reply = await client.chat.completions.create({
-            model,
-            messages: [
-              { role: "system", content: "You are a specialized assistant for summarizing reports of completed tasks into concise, short 1-sentence summaries. The user will give you a description of a task they completed. You should respond with a single, very concise, 1-sentence summary of the task, which just captures the essence of description. Reply with JUST your summary." },
-              { role: "user", content: description }
-            ]
-          })
-          return reply.choices[0].message.content
-        } catch (error) {
-          throw new AppError(`Error when generating short description: ${error}`)
-        }
-      })() as string
+      const short_description = await generate_short_description(argv, description)
 
       const task: Task = {
         date: now.toUTCString(),
@@ -184,12 +165,32 @@ await yargs(hideBin(process.argv))
     }),
   )
   .command(
+    "gen-short-descriptions",
+    "For each task that does not have a short description, generates one for it.",
+    (yargs) => yargs,
+    async (argv) => await tryAppResult(async () => {
+      const tasks = await load_tasks(argv)
+      let count = 0
+      for (const task of tasks) {
+        if (task.short_description === undefined) {
+          console.log(`[•] generating short description for task: \n\n${task.description}\n`)
+          task.short_description = await generate_short_description(argv, task.description)
+          console.log(`[✔] generated short description for task: \n\n${task.short_description!}\n`)
+          count++
+        }
+      }
+      await save_tasks(argv, tasks)
+      console.log(`[✔] generated short descriptions for ${count} tasks`)
+    })
+  )
+  .command(
     "show [number] [unit]",
     "Shows list of tasks in markdown format.",
     (yargs) => yargs
       .positional("number", { type: "number", implies: "unit", })
       .positional("unit", { type: "string", choices: TimeUnit_schema_choices.map(x => x.value), })
-      .option("tags", { description: "Filter by tasks that have any of these tags.", type: "string", string: true, default: "" }),
+      .option("tags", { description: "Filter by tasks that have any of these tags.", string: true, default: "" })
+      .option("short", { description: "Shows the short description instead of the full description for each task", boolean: true, default: false }),
     async (argv) => await tryAppResult(async () => {
       const tasks = await load_tasks(argv)
       const tags = argv.tags.trim() === "" ? [] : argv.tags.trim().split(",")
@@ -214,7 +215,7 @@ ${recent_tasks
             .map((task) => `
 ## ${(new Date(task.date)).toLocaleDateString(undefined, dateStyle)}
 ${task.tags === undefined ? "" : `Tags: ${task.tags.join(", ")}\n`}
-${task.description}
+${argv.short && task.short_description !== undefined ? task.short_description : task.description}
     `.trim())
             .join("\n\n")}
       `.trim()
@@ -288,6 +289,27 @@ ${transcript}`
   .demandCommand()
   .parse()
 
+async function generate_short_description(argv: { dir: string, config: string }, description: string): Promise<string> {
+  const config = await load_config(argv)
+  const baseURL = config.baseURL !== undefined ? config.baseURL : default_Config.baseURL!
+  const apiKey = config.apiKey !== undefined ? config.apiKey : default_Config.apiKey!
+  const model = config.model !== undefined ? config.model : default_Config.model!
+  const client = new OpenAI({ apiKey, baseURL })
+  try {
+    const reply = await client.chat.completions.create({
+      model,
+      messages: [
+        { role: "system", content: "You are a specialized assistant for summarizing reports of completed tasks into concise, short 1-sentence summaries. The user will give you a description of a task they completed. You should respond with a single, very concise, 1-sentence summary of the task, which just captures the essence of description. Reply with JUST your summary." },
+        { role: "user", content: description }
+      ]
+    })
+    const content = reply.choices[0].message.content
+    if (content === null) throw new AppError("Error when generating short description: reply's content is null")
+    return content
+  } catch (error) {
+    throw new AppError(`Error when generating short description: ${error}`)
+  }
+}
 
 async function load_config(argv: { dir: string, config: string }): Promise<Config> {
   const config_json = await Bun.file(`${get_config_filepath(argv)}`).json()
