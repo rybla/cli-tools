@@ -172,4 +172,4 @@ dist
 .idea
 
 # Finder (MacOS) folder config
-.DS_Store
+**/*.DS_Store

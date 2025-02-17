@@ -4,97 +4,8 @@ import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
 import { z } from "zod"
 import { exists, mkdir } from "node:fs/promises"
-import { homedir } from "node:os"
-
-// -----------------------------------------------------------------------------
-// types
-// -----------------------------------------------------------------------------
-
-type Task = z.infer<typeof Task_schema>
-const Task_schema = z.object({
-  date: z.string(),
-  description: z.string(),
-  short_description: z.optional(z.string()),
-  tags: z.optional(z.array(z.string()))
-})
-
-type Tasks = z.infer<typeof Tasks_schema>
-const Tasks_schema = z.array(Task_schema)
-
-type TimeUnit = z.infer<typeof TimeUnit_schema>
-const TimeUnit_schema_choices = [
-  z.literal("min"),
-  z.literal("hour"),
-  z.literal("day"),
-  z.literal("week"),
-  z.literal("year")
-] as const
-const TimeUnit_schema = z.union(TimeUnit_schema_choices)
-
-type Duration = { n: number, unit: TimeUnit }
-const Duration_schema = z.object({ n: z.number(), unit: TimeUnit_schema })
-
-function parseDuration(s: string): Duration {
-  const error = new AppError(`Error during parseDuration: invalid Duration: ${s}`)
-  s = s.trim()
-
-  function go(ss: string[]) {
-    const n = trySafeParse("number", z.number().safeParse(JSON.parse(ss[0])))
-    const unit = trySafeParse("unit", TimeUnit_schema.safeParse(ss[1]))
-    return { n, unit }
-  }
-  { const ss = s.split(" "); if (ss.length == 2) { return go(ss) } }
-  { const ss = s.split("."); if (ss.length == 2) { return go(ss) } }
-  throw error
-}
-
-function showDuration(d: Duration) {
-  return `${d.n} ${d.unit}`
-}
-
-type Config = z.infer<typeof Config_schema>
-const Config_schema = z.object({
-  baseURL: z.optional(z.string()),
-  apiKey: z.optional(z.string()),
-  model: z.optional(z.string()),
-  recency: z.optional(Duration_schema)
-})
-
-const default_Config: Config = {
-  baseURL: "http://localhost:11434/v1",
-  apiKey: "ollama",
-  model: "llama3.2:latest",
-  recency: { n: 1, unit: "day" },
-}
-
-// const default_dir = "~/.tasks"
-const default_dir = `${homedir()}/.tasks`
-function get_dir(argv: { dir: string }): string { return argv.dir }
-function get_config_filepath(argv: { dir: string }): string { return `${argv.dir}/config.json` }
-function get_tasks_filepath(argv: { dir: string }): string { return `${argv.dir}/tasks.json` }
-
-// -----------------------------------------------------------------------------
-// AppError
-// -----------------------------------------------------------------------------
-
-class AppError extends Error {
-  constructor(msg: string) {
-    super(msg)
-    this.name = "Tasks App Error"
-    Object.setPrototypeOf(this, AppError.prototype)
-  }
-}
-
-async function tryAppResult<T>(k: () => Promise<T>): Promise<void> {
-  try { await k() }
-  catch (error) {
-    if (error instanceof AppError) {
-      console.error(error.message)
-    } else {
-      throw error
-    }
-  }
-}
+import { AppError, Config_schema, default_Config, parseDuration, showDuration, Tasks_schema, TimeUnit_schema, TimeUnit_schema_choices, tryAppResult, trySafeParse, type Config, type Duration, type Task, type Tasks } from "../common/types"
+import { default_dir, get_config_filepath, get_dir, get_tasks_filepath } from "./common"
 
 // -----------------------------------------------------------------------------
 // yargs
@@ -132,7 +43,7 @@ await yargs(hideBin(process.argv))
       const config = await load_config(argv)
 
       if (key === "recency") {
-        config[key] = trySafeParse("recency", Duration_schema.safeParse(JSON.parse(argv.val)))
+        config[key] = parseDuration(argv.val)
       } else {
         config[key] = argv.val
       }
@@ -250,7 +161,7 @@ ${argv.short && task.short_description !== undefined ? task.short_description : 
     (yargs) => yargs,
     async (argv) => await tryAppResult(async () => {
       const tasks = await load_tasks(argv)
-      const tags = new Set(tasks.flatMap(task => task.tags ?? []))
+      const tags = new Set(tasks.flatMap((task) => task.tags ?? []))
       console.log(`
 Tags:
 ${[...tags].map(tag => ` • ${tag}`).join("\n")}
@@ -372,9 +283,4 @@ function extract_recent_tasks(tasks: Task[], d: Duration): Task[] {
 async function save_tasks(argv: { dir: string }, tasks: Task[]): Promise<void> {
   const tasks_file = Bun.file(`${get_tasks_filepath(argv)}`)
   Bun.write(tasks_file, JSON.stringify(tasks, undefined, "    "))
-}
-
-function trySafeParse<T, U>(label: string, pr: z.SafeParseReturnType<T, U>): U {
-  if (!pr.success) throw new AppError(`Parse error at "${label}": ${pr.error.toString()}`)
-  return pr.data
 }
