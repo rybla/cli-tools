@@ -169,21 +169,21 @@ ${[...tags].map(tag => ` • ${tag}`).join("\n")}
     })
   )
   .command(
-    "summarize <number> <unit>",
+    "summarize <duration>",
     "Summarizes tasks in the recent duration.",
     (yargs) => yargs
-      .positional("number", { type: "number", demandOption: true })
-      .positional("unit", { type: "string", choices: TimeUnit_schema_choices.map(x => x.value), demandOption: true }),
+      .positional("duration", { type: "string", demandOption: true }),
     async (argv) => await tryAppResult(async () => {
       const config = await load_config(argv)
       const baseURL = config.baseURL !== undefined ? config.baseURL : default_Config.baseURL!
       const apiKey = config.apiKey !== undefined ? config.apiKey : default_Config.apiKey!
       const model = config.model !== undefined ? config.model : default_Config.model!
 
-      const unit = trySafeParse("unit", TimeUnit_schema.safeParse(argv.unit))
-      const n = trySafeParse("n", z.number().safeParse(argv.number))
+      // const unit = trySafeParse("unit", TimeUnit_schema.safeParse(argv.unit))
+      // const n = trySafeParse("n", z.number().safeParse(argv.number))
+      const duration = parseDuration(argv.duration)
       const tasks = await load_tasks(argv)
-      const recent_tasks = extract_recent_tasks(tasks, { n, unit })
+      const recent_tasks = extract_recent_tasks(tasks, duration)
 
       const client = new OpenAI({ apiKey, baseURL })
       const transcript = recent_tasks
